@@ -230,7 +230,6 @@ S390X_BLOCKLIST = [
     "inductor/test_cpu_repro",
     "lazy/test_meta_kernel",
     "profiler/test_profiler",
-    "test_jit",
     # these tests run long and fail in addition to that
     "dynamo/test_dynamic_shapes",
     "test_quantization",
