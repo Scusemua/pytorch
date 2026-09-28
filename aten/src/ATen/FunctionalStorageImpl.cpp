@@ -39,6 +39,15 @@ static const Tensor apply_update(const FunctionalStorageImpl::Update& update, co
   TORCH_INTERNAL_ASSERT(!at::functionalization::impl::isFunctionalTensor(t));
   if (update.view_metas.empty()) { return t; }
 
+  // The view inverses below assume every element of a view is its own memory location.
+  // A broadcasting expand() breaks that assumption.
+  for (const auto& meta : update.view_metas) {
+    TORCH_CHECK(
+        !meta->is_expand,
+        "Functionalization encountered a mutation through a view with internal overlap (e.g. a broadcasting "
+        "expand()). This is not supported yet.");
+  }
+
   std::vector<at::Tensor> tmp_values({base});
   tmp_values.reserve(update.view_metas.size());
   for (size_t i = 0; i < update.view_metas.size() - 1; ++i) {
