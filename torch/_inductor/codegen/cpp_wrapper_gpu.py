@@ -6,7 +6,7 @@ import os
 import re
 import sys
 from itertools import count, zip_longest
-from typing import Any, cast
+from typing import Any, cast, TYPE_CHECKING
 from typing_extensions import Self
 
 import sympy
@@ -54,6 +54,10 @@ from .cpp_wrapper_cpu import CppWrapperCpu
 from .multi_kernel import MultiKernelCall
 from .triton_utils import should_unwrap_unspec_arg
 from .wrapper import PythonWrapperCodegen, SymbolicCallArg
+
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 
 _cpp_string_literal_escapes = {
@@ -1327,6 +1331,12 @@ class CppWrapperGpu(CppWrapperCpu):
             return
 
         super().write_header()
+        if (
+            self.device == "cuda"
+            and config.cuda.autotune_tunableop_dynamic_dims_wildcard
+        ):
+            self.header.splice("#include <ATen/cuda/tunable/Tunable.h>")
+            self.header.splice("#include <optional>")
         kernel_driver = maybe_hipify_code_wrapper(self.device_codegen.kernel_driver())
         if V.graph.is_const_graph and V.graph.is_dual_wrapper_mode:
             # For a dual-wrapper-mode const graph, only the standalone JIT
@@ -1521,6 +1531,75 @@ class CppWrapperGpu(CppWrapperCpu):
                 V.extern_kernel_nodes.pop()
             return
         super()._generate_extern_kernel_alloc_helper(extern_kernel, args)
+
+    @staticmethod
+    def _tunableop_dynamic_dims_mask_bits(
+        mask: tuple[bool, bool, bool, bool] | None,
+    ) -> int:
+        if mask is None:
+            return 0
+        return sum(1 << index for index, dynamic in enumerate(mask) if dynamic)
+
+    def _begin_tunableop_dynamic_dims_guard(
+        self,
+        mask: tuple[bool, bool, bool, bool] | None,
+        device_type: str,
+    ) -> bool:
+        if (
+            device_type != "cuda"
+            or not config.cuda.autotune_tunableop_dynamic_dims_wildcard
+        ):
+            return False
+        bits = self._tunableop_dynamic_dims_mask_bits(mask)
+        if bits == 0:
+            return False
+        self.writeline("{")
+        self.writeline(
+            "std::optional<at::cuda::tunable::TunableDynamicDimsGuard> "
+            "tunable_dynamic_dims_guard;"
+        )
+        self.writeline(
+            "auto* tunable_context = at::cuda::tunable::getTuningContext();"
+        )
+        self.writeline(
+            "if (tunable_context->IsTuningEnabled() && "
+            "tunable_context->IsTunableOpEnabled()) {"
+        )
+        self.writeline(
+            "tunable_dynamic_dims_guard.emplace("
+            f"at::cuda::tunable::DynamicDimsMask{{{bits}}});"
+        )
+        self.writeline("}")
+        return True
+
+    def generate_c_shim_extern_kernel_call(
+        self,
+        kernel: str,
+        args: list[str],
+        device: str,
+        *,
+        debug_args: list[str] | None = None,
+        stack_traces: OrderedSet[str] | None = None,
+        profiling_args: Sequence[str | None] | None = None,
+        output_handle: str | None = None,
+        tunable_dyn_dims_mask: tuple[bool, bool, bool, bool] | None = None,
+    ) -> None:
+        guarded = self._begin_tunableop_dynamic_dims_guard(
+            tunable_dyn_dims_mask, device
+        )
+        try:
+            super().generate_c_shim_extern_kernel_call(
+                kernel,
+                args,
+                device,
+                debug_args=debug_args,
+                stack_traces=stack_traces,
+                profiling_args=profiling_args,
+                output_handle=output_handle,
+            )
+        finally:
+            if guarded:
+                self.writeline("}")
 
     def generate_fallback_kernel_with_runtime_lookup(
         self,
